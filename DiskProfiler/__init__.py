@@ -1,1 +1,1 @@
-from diskprofiler import profiler
+from .diskprofiler import profiler

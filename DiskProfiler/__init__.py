@@ -1,0 +1,1 @@
+from diskprofiler import profiler

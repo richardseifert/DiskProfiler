@@ -1,2 +1,2 @@
 # DiskProfiler
-Tool for collapsing protoplanetary disk images or spectral cubes into radial or azimuthal profiles.
+Tool for collapsing protoplanetary disk images or spectral cubes into deprojected radial or azimuthal profiles.

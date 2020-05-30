@@ -175,9 +175,14 @@ class fitscube:
     def get_ny(self):
         return self.img.shape[self.yi]
     def get_nchan(self):
+        if self.vi is None:
+            return 1
         return self.img.shape[self.vi]
 
     def get_mom0(self,use_mask=True,deproj=False):
+        if self.vi is None:
+            return self.img
+
         nchan = self.get_nchan()
         specarr = self.dvel*np.arange(nchan)
         if use_mask:
@@ -239,7 +244,7 @@ class fitscube:
 
         #Set y spatial axis.
         if not yi is None:
-                self.yi = yi
+            self.yi = yi
         else:
             if found['yi'] is None:
                 raise ValueError("Could not determine which axes corresponds to DEC")
@@ -247,11 +252,13 @@ class fitscube:
 
         #Set v spectral axis.
         if not vi is None:
-                self.vi = vi
+            self.vi = vi
         else:
             if found['vi'] is None:
                 raise ValueError("Could not determine which axes corresponds to Frequency/Velocity")
             self.vi = found['vi']
+            if self.vi >= self.img.ndim:
+                self.vi = None
     def find_axes(self): 
         '''
         Use image header to determine axes indices corresponding to spatial and spectral axes.

@@ -9,50 +9,79 @@ class profiler:
     def __init__(self,fpath,mpath=None,cx=None,cy=None,pa=None,inc=None,**kwargs):
         self.cube = fitscube(fpath=fpath,mpath=mpath,**kwargs)
         self.geom = diskgeom(self.cube,cx=cx,cy=cy,pa=pa,inc=inc)
+        
+        self.points = {}
+        self.values = {}
 
-    def get_rprofile(self,rlo=0,rhi=None,nbins=100,dr=None,azlo=0,azhi=360,spat='radec'):
-        r,az = self.geom.get_raz_arrs(use=spat)
-        mom0 = self.cube.get_mom0()
+        self.profiles = {}
 
+    def get_points(self,spat='radec'):
+        k = 'spat_%s'%(spat)
+        if not k in self.points.keys():
+            r,az = self.geom.get_raz_arrs(use=spat)
+            self.points[k] = np.c_[r.flatten(),az.flatten()]
+        return self.points[k]
+    def get_values(self):
+        k = 'mom0'
+        if not k in self.values:
+            self.values[k] = self.cube.get_mom0().flatten()
+        return self.values[k]
+
+    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec'):
+        #Grab r and az 1D arrays.
+        rpts,azpts = self.get_points(spat).T
+
+        #Handle input r and az bounds: rlo,rhi, azlo,azhi
         if rhi is None:
-            rhi = np.max(r)
-        if not dr is None:
-            nbins = (rhi-rlo)/dr + 1
-        rbins = np.linspace(rlo,rhi,nbins)
+            rhi = np.max(rpts)
+        daz = (azhi-azlo)%360
+        if daz == 0: daz = 360
+        az_offset = azlo
+        azpts = (azpts-azlo)%360
+        azlo = 0
+        azhi = daz
 
-        R = np.array([])
-        I = np.array([])
-        for rl,rh in zip(rbins[:-1],rbins[1:]):
-            mask = self.geom.get_raz_mask(rlo=rl,rhi=rh,azlo=azlo,azhi=azhi)
-            R = np.append(R,0.5*(rl+rh))
-            I = np.append(I,np.mean(mom0[mask]))
-        return R,I
+        #Generate x array.
+        if along == 'r':
+            xpts = rpts
+            Dx = rhi-rlo
+            xlo = rlo
+            xhi = rhi
+        elif along == 'az':
+            xpts = azpts
+            Dx = daz
+            xlo = azlo
+            xhi = azhi
+        if not dx is None:
+            nbins = Dx/dx + 1
+        x = np.linspace(xlo,xhi,nbins)
+
+        #Grab mom0 brightness values.
+        bpts = self.get_values()
+
+        #Mask according to non-along axis
+        mask = (azpts >= azlo) & (azpts <= azhi) & (rpts >= rlo) & (rpts <= rhi)
+        bpts = bpts[mask]
+        xpts = xpts[mask]
+
+        #Split into bins
+        bpts_binned = binary_chunkify(bpts,bins=x,barr=xpts)
+
+        #Average
+        y = [np.mean(bpts) for bpts in bpts_binned]
+
+        #Return
+        return x,y
 
     def plot_rprofile(self,rlo=0,rhi=None,nbins=100,dr=None,azlo=0,azhi=360,ax=None,**plot_kwargs):
-        R,I = self.get_rprofile(rlo=rlo,rhi=rhi,nbins=nbins,dr=dr,azlo=azlo,azhi=azhi)
+        R,I = self.get_profile(along='r',rlo=rlo,rhi=rhi,nbins=nbins,dr=dr,azlo=azlo,azhi=azhi)
         if ax is None:
             fig,ax = plt.subplots()
         ax.plot(R,I,**plot_kwargs)
         return ax
 
-    def get_azprofile(self,azlo=0,azhi=360,nbins=100,daz=None,rlo=0,rhi=None,spat='radec'):
-        r,az = self.geom.get_raz_arrs(use=spat)
-        mom0 = self.cube.get_mom0()
-
-        if not daz is None:
-            nbins = (azhi-azlo)/daz + 1
-        azbins = np.linspace(azlo,azhi,nbins)
-
-        Az = np.array([])
-        I = np.array([])
-        for azl,azh in zip(azbins[:-1],azbins[1:]):
-            mask = self.geom.get_raz_mask(azlo=azl,azhi=azh,rlo=rlo,rhi=rhi)
-            Az = np.append(Az,0.5*(azl+azh))
-            I = np.append(I,np.mean(mom0[mask]))
-        return Az,I
-
     def plot_azprofile(self,azlo=0,azhi=360,nbins=100,daz=None,rlo=0,rhi=None,ax=None,**plot_kwargs):
-        Az,I = self.get_azprofile(azlo=azlo,azhi=azhi,nbins=nbins,daz=daz,rlo=rlo,rhi=rhi)
+        Az,I = self.get_profile(along='az',azlo=azlo,azhi=azhi,nbins=nbins,daz=daz,rlo=rlo,rhi=rhi)
         if ax is None:
             fig,ax = plt.subplots()
         ax.plot(Az,I,**plot_kwargs)
@@ -572,3 +601,21 @@ class diskgeom:
         elif use == 'xy':
             xarr,yarr = self.get_xy_arrs(center)
         ax.contour(xarr,yarr,maz,levels=azim,**contour_kwargs)
+
+
+def binary_chunkify(arr,bins,barr=None):
+    if len(bins) == 1:
+        split = barr<=bins[0]
+        chunks = [arr[split],arr[~split]]
+        return chunks
+    elif len(bins) == 0:
+        return [arr]
+    else:
+        chunks = []
+        i = int(len(bins)/2)
+        split = barr<=bins[i]
+        left_chunks = binary_chunkify(arr[split],bins[:i],barr=barr[split])
+        right_chunks = binary_chunkify(arr[~split],bins[i+1:],barr=barr[~split])
+        chunks.extend(left_chunks)
+        chunks.extend(right_chunks)
+        return [chunk for chunk in chunks if len(chunk) > 0]

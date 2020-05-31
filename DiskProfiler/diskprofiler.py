@@ -7,29 +7,35 @@ from astropy.wcs import WCS
 
 class profiler:
     def __init__(self,fpath,mpath=None,cx=None,cy=None,pa=None,inc=None,**kwargs):
+        #Load data as fitscube object.
         self.cube = fitscube(fpath=fpath,mpath=mpath,**kwargs)
+        #Set disk geometry.
         self.geom = diskgeom(self.cube,cx=cx,cy=cy,pa=pa,inc=inc)
         
+        #Dictionaries for storing intermediate products.
         self.points = {}
         self.values = {}
 
-        self.profiles = {}
+        #Dictionaries for unit conversions
+        self.sunit_conv = {'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
+        self.bunit_conv = {'Jy/beam':1.0,'mJy/beam':1000}
 
     def get_points(self,spat='radec'):
         k = 'spat_%s'%(spat)
         if not k in self.points.keys():
             r,az = self.geom.get_raz_arrs(use=spat)
             self.points[k] = np.c_[r.flatten(),az.flatten()]
-        return self.points[k]
+        return self.points[k].copy()
     def get_values(self):
         k = 'mom0'
-        if not k in self.values:
+        if not k in self.values.keys():
             self.values[k] = self.cube.get_mom0().flatten()
-        return self.values[k]
+        return self.values[k].copy()
 
-    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec'):
+    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None):
         #Grab r and az 1D arrays.
         rpts,azpts = self.get_points(spat).T
+        rpts *= self.sunit_conv[spat_unit]
 
         #Handle input r and az bounds: rlo,rhi, azlo,azhi
         if rhi is None:
@@ -58,6 +64,7 @@ class profiler:
 
         #Grab mom0 brightness values.
         bpts = self.get_values()
+        bpts *= self.bunit_conv[bunit]
 
         #Mask according to non-along axis
         mask = (azpts >= azlo) & (azpts <= azhi) & (rpts >= rlo) & (rpts <= rhi)
@@ -68,42 +75,47 @@ class profiler:
         bpts_binned = binary_chunkify(bpts,bins=x,barr=xpts)
 
         #Average
-        y = [np.mean(bpts) for bpts in bpts_binned]
+        y = np.array([np.mean(bpts) for bpts in bpts_binned])
+
+        if noise_method == 'std':
+            dy = np.array([np.std(bpts) for bpts in bpts_binned])
+        elif noise_method == 'Nbeam':
+            #dy = npts*pixarea/beamarea * noise_per_beam
+            pass
+        elif noise_method is None:
+            dy = np.zeros_like(y)
 
         #Return
-        return x,y
+        return x,y,dy
 
-    def plot_rprofile(self,rlo=0,rhi=None,nbins=100,dr=None,azlo=0,azhi=360,ax=None,**plot_kwargs):
-        R,I = self.get_profile(along='r',rlo=rlo,rhi=rhi,nbins=nbins,dr=dr,azlo=azlo,azhi=azhi)
+    def plot_profile(self,ax=None,kind='smooth',plot_kwargs={},fill_kwargs={},**profile_kwargs):
         if ax is None:
             fig,ax = plt.subplots()
-        ax.plot(R,I,**plot_kwargs)
-        return ax
-
-    def plot_azprofile(self,azlo=0,azhi=360,nbins=100,daz=None,rlo=0,rhi=None,ax=None,**plot_kwargs):
-        Az,I = self.get_profile(along='az',azlo=azlo,azhi=azhi,nbins=nbins,daz=daz,rlo=rlo,rhi=rhi)
-        if ax is None:
-            fig,ax = plt.subplots()
-        ax.plot(Az,I,**plot_kwargs)
-        return ax
-
-    def get_azim_cut(self,rlo=0,rhi=None,nbins=100,dr=None,azim=0):
-        points,values = self.geom.get_grid(inputs="raz",target="mom0")
-        if rhi is None:
-            rhi = np.max(r)
-        if not dr is None:
-            nbins = (rhi-rlo)/dr
-        R = np.linspace(rlo,rhi,nbins)
+        x,y,dy = self.get_profile(**profile_kwargs)
         
-        I = griddata(points,values,(R,azim),method='nearest')
+        #Plot error
+        fkwargs = {'color':'cornflowerblue','alpha':0.8,'linewidth':0} #Default fill kwargs
+        if kind == 'step': fkwargs['step'] = 'mid'
+        fkwargs.update(fill_kwargs)
+        ax.fill_between(x,y-dy,y+dy,**fkwargs)
+        #Plot profile
+        pkwargs = {'color':'black'} #Default plot kwargs
+        if kind == 'step': pkwargs['where'] = 'mid'
+        pkwargs.update(plot_kwargs)
+        if kind == 'smooth':
+            ax.plot(x,y,**pkwargs)
+        elif kind == 'step':
+            ax.step(x,y,**pkwargs)
 
-        return R,I
-    def plot_azim_cut(self,rlo=0,rhi=None,nbins=100,dr=None,azim=0,ax=None,**plot_kwargs):
-        R,I = self.get_azim_cut(rlo=rlo,rhi=rhi,nbins=nbins,dr=dr,azim=azim)
-        if ax is None:
-            fig,ax = plt.subplots()
-        ax.plot(R,I,**plot_kwargs)
-    
+        return ax
+
+    def plot_summarized_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,img_ax=None,prf_ax=None,disp_img=True,**kwargs):
+        #Plot image and grid on img_ax
+
+        #Plot profile on prf_ax
+
+        return img_ax,prf_ax
+
     def get_segmented_rprofs(self,rlo=0,rhi=None,nbins=100,dr=None,azlo=0,azhi=360,nseg=8,spat='radec'):
         daz = (azhi-azlo)%360
         if daz == 0:
@@ -117,10 +129,10 @@ class profiler:
         return rprofs
 
     ### Re-route to fitscube methods ###
-    def display(self,center=True,spat_mult=1.0,*args,**kwargs):
+    def display(self,center=True,spat_unit='arcsec',bunit='mJy/beam',*args,**kwargs):
         xarr,yarr = self.geom.get_radec_arrs(center=center)
-        xarr *= spat_mult
-        yarr *= spat_mult #Convert from, e.g., degrees to arcseconds.
+        xarr *= self.sunit_conv[spat_unit]
+        yarr *= self.sunit_conv[spat_unit] #Convert from, e.g., degrees to arcseconds.
         return self.cube.display(xarr=xarr,yarr=yarr,*args,**kwargs)
 
     ### Re-route to diskgeom methods ###
@@ -190,7 +202,7 @@ class fitscube:
 
         #Trim dimensions of size 1.
         if trim:
-            indx = [slice(None) if dat.shape[i]>1 else 0 for i in range(dat.ndim)]
+            indx = tuple([slice(None) if dat.shape[i]>1 else 0 for i in range(dat.ndim)])
             dat = dat[indx]
 
         #Return!
@@ -547,6 +559,16 @@ class diskgeom:
         deproj = griddata(points, values, (d,az),method='linear')
         deproj[np.isnan(deproj)] = 0.0
         return deproj
+    def plot_center(ax=None,center=True,**scatter_kwargs):
+        if ax is None:
+            fig,ax = plt.subplots()
+        if not center:
+            cx = self.g['cx']
+            cy = self.g['cy']
+        else:
+            cx,cy = 0.,0.
+        ax.scatter([cx],[cy],**scatter_kwargs)
+        
     def plot_ellipse(self,rad,azlo=0,azhi=360,use='radec',center=True,ax=None,**contour_kwargs):
         if ax is None:
             fig,ax = plt.subplots()
@@ -601,6 +623,9 @@ class diskgeom:
         elif use == 'xy':
             xarr,yarr = self.get_xy_arrs(center)
         ax.contour(xarr,yarr,maz,levels=azim,**contour_kwargs)
+
+    def plot_grid(self,rlo,rhi,azlo=0,azhi=360,Nr=10,Naz=10,mark_center=True,color='blue',**contour_kwargs):
+        pass
 
 
 def binary_chunkify(arr,bins,barr=None):

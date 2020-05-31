@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from scipy.interpolate import griddata,interp2d
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -79,7 +80,6 @@ class profiler:
         if daz == 0:
             daz = 360
         bins = (np.arange(nseg+1)*daz/(nseg) + azlo)%360
-        print(bins)
         rprofs = {}
         for azl,azh in zip(bins[:-1],bins[1:]):
             R,I = self.get_rprofile(rlo=rlo,rhi=rhi,nbins=nbins,dr=dr,azlo=azl,azhi=azh,spat=spat)
@@ -300,6 +300,8 @@ class fitscube:
         # determine scale limits, if not given.
         if vmin is None:
             vmin = np.nanmin(img)
+            if norm == 'log' and vmin <= 0:
+                vmin = 1e-20
         if vmax is None:
             vmax = np.nanmax(img)
         
@@ -312,8 +314,7 @@ class fitscube:
             cmnorm = None
         elif norm=='log':
             cmnorm = LogNorm(vmin=np.log10(vmin),vmax=np.log10(vmax))
-            img[img<0] = vmin
-            print("Clipped negatives!",np.any(img<0))
+            img[img<=0] = vmin
 
         if method == 'contour':
             #Preparations:
@@ -338,10 +339,8 @@ class fitscube:
             nx = img.shape[0]
             ny = img.shape[1]
             x_bl = xarr[nx-1,0] #bottom left
-            #x_bl = xarr[0,0] #bottom left
             x_tr = xarr[0,ny-1] #top right
             y_bl = yarr[nx-1,0]
-            #y_bl = yarr[0,0]
             y_tr = yarr[0,ny-1]
             #Plot!
             im = ax.imshow(img,cmap=cmap,vmin=vmin,vmax=vmax,extent=[x_bl,x_tr,y_bl,y_tr],norm=cmnorm)
@@ -573,43 +572,3 @@ class diskgeom:
         elif use == 'xy':
             xarr,yarr = self.get_xy_arrs(center)
         ax.contour(xarr,yarr,maz,levels=azim,**contour_kwargs)
-
-if __name__ == '__main__':
-    fpath = "H13COp32/m02_xrfid_flatCO_1xN2_H13CO+.fits"
-
-    mpath = "/mnt/BigSlow/ras8qnr/ALMA_Data/IM_Lup/IM_Lup_H13COp/iml_H13COp32_51ch.mask.fits"
-    fpath = "/mnt/BigSlow/ras8qnr/ALMA_Data/IM_Lup/IM_Lup_H13COp/iml_H13COp32_51ch.image.fits"
-
-    mpath = "/mnt/BigSlow/ras8qnr/ALMA_Data/IM_Lup/IM_Lup_N2Hp32_combo/iml_N2Hp32_39ch.mask.fits"
-    fpath = "/mnt/BigSlow/ras8qnr/ALMA_Data/IM_Lup/IM_Lup_N2Hp32_combo/iml_N2Hp32_39ch.image.fits"
-
-    prof = profiler(fpath=fpath,mpath=mpath,pa=180-35,inc=49)
-
-    ax,_ = prof.display(method='contour',vmin=0.,cmap='gist_heat')
-    rads = np.linspace(0,1.5e-3,16)[1:]
-    azims = np.linspace(0,360,9)[1:] 
-    
-    prof.plot_ray(azims,rlo=rads[0],rhi=rads[-1],ax=ax,colors='coral',linestyles='-',alpha=0.7)
-    prof.plot_ellipse(rads,ax=ax,cmap='PuBu',alpha=0.7)
-
-    fig,ax = plt.subplots()
-    rprofs = prof.get_segmented_rprofs(rhi=1.5e-3,nseg=7,nbins=25)
-    R = rprofs['R']
-    cm = plt.get_cmap('hsv')
-    for k in rprofs.keys():
-        if k == 'R':
-            continue
-        color = cm(k/360)
-        ax.plot(R,rprofs[k],color=color)
-    prof.plot_rprofile(rhi=1.5e-3,nbins=25,ax=ax,color='black')
-    #prof.plot_azim_cut(rhi=1.5e-3,azim=0,ax=ax,color='black',ls='--')
-    #rprof.plot_profile(rhi=1.5e-3,azlo=0,azhi=90,ax=ax,color='cornflowerblue')
-    #rprof.plot_profile(rhi=1.5e-3,azlo=90,azhi=180,ax=ax,color='coral')
-
-    fig,ax = plt.subplots()
-    prof.plot_azprofile(rhi=1.5e-3,ax=ax,color='black')
-
-    #azim = 270
-    #rprof.plot_azim_cut(rhi=400,azim=azim,ax=ax,color='black',ls='-')
-     
-    plt.show()

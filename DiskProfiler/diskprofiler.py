@@ -20,10 +20,10 @@ class profiler:
         self.sunit_conv = {'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
         self.bunit_conv = {'Jy/beam':1.0,'mJy/beam':1000}
 
-    def get_points(self,spat='radec'):
+    def get_points(self,spat='radec',unit='arcsec'):
         k = 'spat_%s'%(spat)
         if not k in self.points.keys():
-            r,az = self.geom.get_raz_arrs(use=spat)
+            r,az = self.geom.get_raz_arrs(use=spat,unit=unit)
             self.points[k] = np.c_[r.flatten(),az.flatten()]
         return self.points[k].copy()
     def get_values(self):
@@ -34,8 +34,7 @@ class profiler:
 
     def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None):
         #Grab r and az 1D arrays.
-        rpts,azpts = self.get_points(spat).T
-        rpts *= self.sunit_conv[spat_unit]
+        rpts,azpts = self.get_points(spat,unit=spat_unit).T
 
         #Handle input r and az bounds: rlo,rhi, azlo,azhi
         if rhi is None:
@@ -110,9 +109,16 @@ class profiler:
         return ax
 
     def plot_summarized_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,img_ax=None,prf_ax=None,disp_img=True,**kwargs):
+        fig,axs = plt.subplots(1,2,figsize=(15,6))
+        img_ax,prf_ax = axs.flatten()
+
         #Plot image and grid on img_ax
+        self.display(cmap='gist_heat',vmin=0,ax=img_ax)
+        self.plot_grid(rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,ax=img_ax,colors='white')
 
         #Plot profile on prf_ax
+        self.plot_profile(along=along,rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,ax=prf_ax,**kwargs)
+        
 
         return img_ax,prf_ax
 
@@ -130,9 +136,7 @@ class profiler:
 
     ### Re-route to fitscube methods ###
     def display(self,center=True,spat_unit='arcsec',bunit='mJy/beam',*args,**kwargs):
-        xarr,yarr = self.geom.get_radec_arrs(center=center)
-        xarr *= self.sunit_conv[spat_unit]
-        yarr *= self.sunit_conv[spat_unit] #Convert from, e.g., degrees to arcseconds.
+        xarr,yarr = self.geom.get_radec_arrs(center=center,unit=spat_unit)
         return self.cube.display(xarr=xarr,yarr=yarr,*args,**kwargs)
 
     ### Re-route to diskgeom methods ###
@@ -140,6 +144,8 @@ class profiler:
         return self.geom.plot_ellipse(*args,**kwargs)
     def plot_ray(self,*args,**kwargs):
         return self.geom.plot_ray(*args,**kwargs)
+    def plot_grid(self,*args,**kwargs):
+        return self.geom.plot_grid(*args,**kwargs)
 
 
 class fitscube:
@@ -433,6 +439,9 @@ class diskgeom:
         self.points = {}
         self.values = {}
 
+        #Dictionary for unit conversions
+        self.unit_conv = {'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
+
     def get(self,k):
         return self.g[k]
 
@@ -474,23 +483,26 @@ class diskgeom:
         x,y = self.cube.get_xy_arrs()
         if center:
             cx,cy = self.cube.world2pix(self.g['cra'],self.g['cdec'])
-            return x-cx, y-cy
-        else:
-            return x,y
-    def get_radec_arrs(self,center=True):
+            x -= cx
+            y -= cy
+        return x,y
+    def get_radec_arrs(self,center=True,unit='deg'):
         ra,dec = self.cube.get_radec_arrs()
         if center:
-            return ra-self.g['cra'], dec-self.g['cdec']
+            ra = (ra-self.g['cra'])*self.unit_conv[unit]
+            dec = (dec-self.g['cdec'])*self.unit_conv[unit]
         else:
-            return ra, dec
-    def get_raz_arrs(self,use='radec'):
+            ra *= self.unit_conv[unit]
+            dec *= self.unit_conv[unit]
+        return ra,dec
+    def get_raz_arrs(self,use='radec',unit='arcsec'):
         '''
         Get radius and azimuth arrays with same shape as 2D image
         '''
         pa = self.g['pa']*np.pi/180.
         inc= self.g['inc']*np.pi/180.
         if use == 'radec':
-            ra,dec = self.get_radec_arrs()
+            ra,dec = self.get_radec_arrs(center=True,unit=unit)
             phi = np.arctan2(dec,ra)
             d = (ra**2+dec**2)**0.5
         elif use == 'xy':
@@ -501,45 +513,47 @@ class diskgeom:
         b = d*(1-e*np.cos(phi-pa)**2)**0.5
         r = b/np.cos(inc)
         az = (phi*180/np.pi+180-self.g['pa'])%360
+
+        #Return!
         return r,az
 
-    def get_grid(self,inputs="rphi",target="mom0"):
+    #def get_grid(self,inputs="rphi",target="mom0"):
         #Get griddata points and values
-        return self.get_points(inputs), self.get_values(target)
-    def get_points(self,k):
-        if k == 'raz':
-            if not k in self.points.keys():
-                r,az = self.get_raz_arrs()
-                self.points[k] = np.c_[r.flatten(),az.flatten()]
-            return self.points[k]
-        if k == 'xy':
-            if not k in self.points.keys():
-                x,y = self.get_xy_arrs()
-                self.points[k] = np.c_[x.flatten(),y.flatten()]
-            return self.points[k]
-        raise ValueError("Unknown griddata points key, %s"%(k))
-    def get_values(self,k):
-        if k == 'mom0':
-            if not k in self.values.keys():
-                mom0 = self.cube.get_mom0()
-                self.values['mom0'] = mom0.flatten()
-            return self.values['mom0']
-        if k == 'r':
-            pts = self.get_points('raz')
-            return pts[:,0]
-        if k == 'az':
-            pts = self.get_points('raz')
-            return pts[:,1]
-        if k == 'x':
-            pts = self.get_points('xy')
-            return pts[:,0]
-        if k == 'y':
-            pts = self.get_points('xy')
-            return pts[:,1]
-        raise ValueError("Unknown griddata values key, %s"%(k))
+    #    return self.get_points(inputs), self.get_values(target)
+    #def get_points(self,k):
+    #    if k == 'raz':
+    #        if not k in self.points.keys():
+    #            r,az = self.get_raz_arrs()
+    #            self.points[k] = np.c_[r.flatten(),az.flatten()]
+    #        return self.points[k]
+    #    if k == 'xy':
+    #        if not k in self.points.keys():
+    #            x,y = self.get_xy_arrs()
+    #            self.points[k] = np.c_[x.flatten(),y.flatten()]
+    #        return self.points[k]
+    #    raise ValueError("Unknown griddata points key, %s"%(k))
+    #def get_values(self,k):
+    #    if k == 'mom0':
+    #        if not k in self.values.keys():
+    #            mom0 = self.cube.get_mom0()
+    #            self.values['mom0'] = mom0.flatten()
+    #        return self.values['mom0']
+    #    if k == 'r':
+    #        pts = self.get_points('raz')
+    #        return pts[:,0]
+    #    if k == 'az':
+    #        pts = self.get_points('raz')
+    #        return pts[:,1]
+    #    if k == 'x':
+    #        pts = self.get_points('xy')
+    #        return pts[:,0]
+    #    if k == 'y':
+    #        pts = self.get_points('xy')
+    #        return pts[:,1]
+    #    raise ValueError("Unknown griddata values key, %s"%(k))
 
-    def get_raz_mask(self,rlo=0,rhi=None,azlo=0,azhi=360,use='radec'):
-        r,az = self.get_raz_arrs(use=use)
+    def get_raz_mask(self,rlo=0,rhi=None,azlo=0,azhi=360,use='radec',unit='arcsec'):
+        r,az = self.get_raz_arrs(use=use,unit=unit)
         if rhi is None:
             rhi = np.max(r)
         az = (az-azlo)%360
@@ -569,7 +583,7 @@ class diskgeom:
             cx,cy = 0.,0.
         ax.scatter([cx],[cy],**scatter_kwargs)
         
-    def plot_ellipse(self,rad,azlo=0,azhi=360,use='radec',center=True,ax=None,**contour_kwargs):
+    def plot_ellipse(self,rad,azlo=0,azhi=360,use='radec',center=True,unit='arcsec',ax=None,**contour_kwargs):
         if ax is None:
             fig,ax = plt.subplots()
         try:
@@ -578,7 +592,7 @@ class diskgeom:
             rad = [rad]
         rad = np.sort(rad)
 
-        r,az = self.get_raz_arrs(use)
+        r,az = self.get_raz_arrs(use=use,unit=unit)
         az = (az-azlo)%360
         daz = (azhi-azlo)%360
         if daz == 0: daz = 360
@@ -586,12 +600,12 @@ class diskgeom:
         mr[az > daz] = np.nan
 
         if use == 'radec':
-            xarr,yarr = self.get_radec_arrs(center)
+            xarr,yarr = self.get_radec_arrs(center,unit=unit)
         elif use == 'xy':
             xarr,yarr = self.get_xy_arrs(center)
         ax.contour(xarr,yarr,mr,levels=rad,**contour_kwargs)
 
-    def plot_ray(self,azim,rlo=0,rhi=None,npts=100,use='radec',center=True,ax=None,**contour_kwargs):
+    def plot_ray(self,azim,rlo=0,rhi=None,npts=100,use='radec',center=True,unit='arcsec',ax=None,**contour_kwargs):
         if ax is None:
             fig,ax = plt.subplots()
         try:
@@ -603,8 +617,7 @@ class diskgeom:
         if rhi is None:
             rhi = self.cube.get_nx()//2
 
-        r,az = self.get_raz_arrs(use)
-        x,y   = self.get_xy_arrs()
+        r,az = self.get_raz_arrs(use=use,unit=unit)
         maz = az.copy()
         
         #Shift az = 0 to the most distant angle from an azim to be plotted. 
@@ -619,13 +632,35 @@ class diskgeom:
         
 
         if use == 'radec':
-            xarr,yarr = self.get_radec_arrs(center)
+            xarr,yarr = self.get_radec_arrs(center,unit=unit)
         elif use == 'xy':
             xarr,yarr = self.get_xy_arrs(center)
         ax.contour(xarr,yarr,maz,levels=azim,**contour_kwargs)
 
-    def plot_grid(self,rlo,rhi,azlo=0,azhi=360,Nr=10,Naz=10,mark_center=True,color='blue',**contour_kwargs):
-        pass
+    def plot_grid(self,rhi,rlo=0,azlo=0,azhi=360,Nr=10,Naz=10,mark_center=True,color='blue',ax=None,use='radec',center=True,unit='arcsec',**contour_kwargs):
+        #Make ax, if not provided.
+        if ax is None:
+            fig,ax = plt.subplots()
+        #Get lists of radii and azimuths to plot.
+        if rlo == 0:
+            rads = np.linspace(rlo,rhi,Nr+1)[1:]
+        else:
+            rads = np.linspace(rlo,rhi,Nr)
+        az_offset = azlo
+        daz = (azhi-azlo)%360
+        if daz == 0:
+            daz = 360
+        if daz == 360:
+            azims = (np.linspace(0,360,Naz+1)[1:]+az_offset)%360
+        else:
+            azims = (np.linspace(0,daz,Naz)+az_offset)%360
+
+        
+        self.plot_ray(azims,rlo=rads[0],rhi=rads[-1],ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
+        self.plot_ellipse(rads,azlo=azims[0],azhi=azims[0]+daz,ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
+
+        return ax
+        
 
 
 def binary_chunkify(arr,bins,barr=None):

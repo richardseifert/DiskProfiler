@@ -20,6 +20,15 @@ class profiler:
         self.sunit_conv = {'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
         self.bunit_conv = {'Jy/beam':1.0,'mJy/beam':1000}
 
+        #Dictionary to store profiles.
+        self.profiles = {}
+    def write_profile(self,path,*args,**kwargs):
+        x,y,dy = self.get_profile(*args,**kwargs)
+        np.savetxt(path,np.c_[x,y,dy])
+    def load_profile(self,path,key):
+        x,y,dy = np.loadtxt(path,unpack=True)
+        self.profiles[key] = (x,y,dy)
+        return x,y,dy
     def get_points(self,spat='radec',unit='arcsec'):
         k = 'spat_%s'%(spat)
         if not k in self.points.keys():
@@ -32,7 +41,20 @@ class profiler:
             self.values[k] = self.cube.get_mom0().flatten()
         return self.values[k].copy()
 
-    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None):
+    def make_profile_key(self,along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method):
+        things = [along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method]
+        return '_'.join([str(thing) for thing in things])
+
+    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None,from_key=None,to_key=None):
+        if not from_key is None:
+            return self.profiles[from_key]
+        k = self.make_profile_key(along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method)
+        if k in self.profiles.keys():
+            print("Found profile in stores!")
+            return self.profiles[k]
+        if not to_key is None:
+            k = to_key
+        
         #Grab r and az 1D arrays.
         rpts,azpts = self.get_points(spat,unit=spat_unit).T
 
@@ -84,19 +106,21 @@ class profiler:
         elif noise_method is None:
             dy = np.zeros_like(y)
 
-        #Return
+        #Store and Return
+        self.profiles[k] = (x,y,dy)
         return x,y,dy
 
-    def plot_profile(self,ax=None,kind='smooth',plot_kwargs={},fill_kwargs={},**profile_kwargs):
+    def plot_profile(self,ax=None,kind='smooth',ploterr=True,plot_kwargs={},fill_kwargs={},**profile_kwargs):
         if ax is None:
             fig,ax = plt.subplots()
         x,y,dy = self.get_profile(**profile_kwargs)
         
         #Plot error
-        fkwargs = {'color':'cornflowerblue','alpha':0.8,'linewidth':0} #Default fill kwargs
-        if kind == 'step': fkwargs['step'] = 'mid'
-        fkwargs.update(fill_kwargs)
-        ax.fill_between(x,y-dy,y+dy,**fkwargs)
+        if ploterr:
+            fkwargs = {'color':'cornflowerblue','alpha':0.8,'linewidth':0} #Default fill kwargs
+            if kind == 'step': fkwargs['step'] = 'mid'
+            fkwargs.update(fill_kwargs)
+            ax.fill_between(x,y-dy,y+dy,**fkwargs)
         #Plot profile
         pkwargs = {'color':'black'} #Default plot kwargs
         if kind == 'step': pkwargs['where'] = 'mid'

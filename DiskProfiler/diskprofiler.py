@@ -17,8 +17,8 @@ class profiler:
         self.values = {}
 
         #Dictionaries for unit conversions
-        self.sunit_conv = {'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
-        self.bunit_conv = {'Jy/beam':1.0,'mJy/beam':1000}
+        self.sunit_conv = {None:1.0,'deg':1.0,'arcmin':60.0,'arcsec':3600.0}
+        self.bunit_conv = {None:1.0,'Jy/beam':1.0,'mJy/beam':1000}
 
         #Dictionary to store profiles.
         self.profiles = {}
@@ -35,26 +35,39 @@ class profiler:
             r,az = self.geom.get_raz_arrs(use=spat,unit=unit)
             self.points[k] = np.c_[r.flatten(),az.flatten()]
         return self.points[k].copy()
-    def get_values(self):
-        k = 'mom0'
-        if not k in self.values.keys():
-            self.values[k] = self.cube.get_mom0().flatten()
-        return self.values[k].copy()
 
-    def make_profile_key(self,along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method):
-        things = [along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method]
+    def make_profile_key(self,along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method,channel_rms,flux_unc):
+        things = [along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method,channel_rms,flux_unc]
         return '_'.join([str(thing) for thing in things])
 
-    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None,from_key=None,to_key=None):
+    def get_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method='std',channel_rms=None,clip=None,flux_unc=0,min_Nbeam=0.,from_key=None,to_key=None):
+        # If loading from a pre-saved key, retrieve that and return.
         if not from_key is None:
-            return self.profiles[from_key]
-        k = self.make_profile_key(along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method)
+            x,y,dy = self.profiles[from_key]
+            if noise_method is None:
+                dy = np.zeros_like(y)
+            return x,y,dy
+
+        # Otherwise, make profile from scratch!
+
+        #... unless you've made this exact profile before. Then retrieve form key.
+        k = self.make_profile_key(along,rlo,rhi,azlo,azhi,nbins,dx,spat,spat_unit,bunit,noise_method,channel_rms,flux_unc)
         if k in self.profiles.keys():
             print("Found profile in stores!")
             return self.profiles[k]
         if not to_key is None:
             k = to_key
         
+        # Make the profile!
+        x,y,dy = self.make_profile(along=along,rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,nbins=nbins,dx=dx,spat=spat,spat_unit=spat_unit,bunit=bunit,noise_method=noise_method,channel_rms=channel_rms,flux_unc=flux_unc,clip=clip,min_Nbeam=min_Nbeam)
+
+        #Store and Return
+        self.profiles[k] = (x,y,dy)
+
+        return x,y,dy
+
+    def make_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,nbins=100,dx=None,spat='radec',spat_unit='arcsec',bunit='mJy/beam',noise_method=None,channel_rms=None,flux_unc=0.,clip=None,min_Nbeam=0.):
+
         #Grab r and az 1D arrays.
         rpts,azpts = self.get_points(spat,unit=spat_unit).T
 
@@ -81,10 +94,11 @@ class profiler:
             xhi = azhi
         if not dx is None:
             nbins = Dx/dx + 1
+        xbins = np.linspace(xlo,xhi,nbins+1)
         x = np.linspace(xlo,xhi,nbins)
 
         #Grab mom0 brightness values.
-        bpts = self.get_values()
+        bpts = self.cube.get_mom0(clip=clip).flatten()
         bpts *= self.bunit_conv[bunit]
 
         #Mask according to non-along axis
@@ -93,7 +107,7 @@ class profiler:
         xpts = xpts[mask]
 
         #Split into bins
-        bpts_binned = binary_chunkify(bpts,bins=x,barr=xpts)
+        bpts_binned = binary_chunkify(bpts,bins=xbins,barr=xpts)
 
         #Average
         y = np.array([np.mean(bpts) for bpts in bpts_binned])
@@ -101,13 +115,21 @@ class profiler:
         if noise_method == 'std':
             dy = np.array([np.std(bpts) for bpts in bpts_binned])
         elif noise_method == 'Nbeam':
-            #dy = npts*pixarea/beamarea * noise_per_beam
-            pass
+            Npix = np.array([len(bpts) for bpts in bpts_binned])
+            Nbeam = Npix / self.cube.get_beamcorr()
+            Nbeam[Nbeam < min_Nbeam] = min_Nbeam
+            if channel_rms is None:
+                raise ValueError("For Nbeam noise option, channel_rms must be provided")
+            max_nchan = np.array( [np.max(nch_pts) for nch_pts in binary_chunkify(self.cube.get_nchan_map().flatten()[mask],bins=xbins,barr=xpts) ])
+            linewidth = max_nchan * self.cube.find_dvel() #km/s
+            rms = linewidth * channel_rms #mJy/beam km/s
+            dy = rms / np.sqrt(Nbeam)
         elif noise_method is None:
             dy = np.zeros_like(y)
 
-        #Store and Return
-        self.profiles[k] = (x,y,dy)
+        #Add error due to flux calibration uncertainty.
+        dy = (dy**2 + (y*flux_unc)**2)**0.5
+
         return x,y,dy
 
     def plot_profile(self,ax=None,kind='smooth',ploterr=True,plot_kwargs={},fill_kwargs={},**profile_kwargs):
@@ -132,18 +154,22 @@ class profiler:
 
         return ax
 
-    def plot_summarized_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,img_ax=None,prf_ax=None,disp_img=True,**kwargs):
-        fig,axs = plt.subplots(1,2,figsize=(15,6))
-        img_ax,prf_ax = axs.flatten()
+    def plot_summarized_profile(self,along='r',rlo=0,rhi=None,azlo=0,azhi=360,noise_method=None,Nr=10,Naz=10,bunit='mJy/beam',
+                                vmin=0,vmax=None,img_ax=None,prf_ax=None,disp_img=True,disp_kwargs=None,clip=None,**kwargs):
+        if img_ax is None or prf_ax is None:
+            fig,axs = plt.subplots(1,2,figsize=(15,6))
+            img_ax,prf_ax = axs.flatten()
+        if disp_kwargs is None:
+            disp_kwargs = {}
 
         #Plot image and grid on img_ax
-        self.display(cmap='gist_heat',vmin=0,ax=img_ax)
-        self.plot_grid(rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,ax=img_ax,colors='white')
+        self.display(vmin=vmin,vmax=vmax,ax=img_ax,mult=self.bunit_conv[bunit],clip=clip,**disp_kwargs)
+        self.plot_grid(rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,Nr=Nr,Naz=Naz,ax=img_ax,colors='white')
 
         #Plot profile on prf_ax
-        self.plot_profile(along=along,rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,ax=prf_ax,**kwargs)
+        self.plot_profile(along=along,rlo=rlo,rhi=rhi,azlo=azlo,azhi=azhi,noise_method=noise_method,clip=clip,ax=prf_ax,**kwargs)
+        prf_ax.set_xlim(rlo,rhi)
         
-
         return img_ax,prf_ax
 
     def get_segmented_rprofs(self,rlo=0,rhi=None,nbins=100,dr=None,azlo=0,azhi=360,nseg=8,spat='radec'):
@@ -161,7 +187,19 @@ class profiler:
     ### Re-route to fitscube methods ###
     def display(self,center=True,spat_unit='arcsec',bunit='mJy/beam',*args,**kwargs):
         xarr,yarr = self.geom.get_radec_arrs(center=center,unit=spat_unit)
-        return self.cube.display(xarr=xarr,yarr=yarr,*args,**kwargs)
+        if not 'mult' in kwargs:
+            return self.cube.display(xarr=xarr,yarr=yarr,mult=self.bunit_conv[bunit],*args,**kwargs)
+        else:
+            return self.cube.display(xarr=xarr,yarr=yarr,*args,**kwargs)
+            
+    def get_mom0(self,bunit='mJy/beam',*args,**kwargs):
+        return self.bunit_conv[bunit]*self.cube.get_mom0(*args,**kwargs)
+    def get_channel(self,bunit='mJy/beam',*args,**kwargs):
+        return self.bunit_conv[bunit]*self.cube.get_channel_map(*args,**kwargs)
+    def get_dvel(self):
+        return self.cube.dvel
+    def get_nchan(self):
+        return self.cube.get_nchan()
 
     ### Re-route to diskgeom methods ###
     def plot_ellipse(self,*args,**kwargs):
@@ -176,6 +214,14 @@ class fitscube:
     def __init__(self,fpath,mpath=None,xi=None,yi=None,vi=None,dvel=None):
         #Load image and mask
         self.img,self.head = self.load_cube(fpath,header=True)
+        #Get pixel size!
+        ra_n = self.header_get_CN(look_for='RA')
+        dec_n = self.header_get_CN(look_for='DEC')
+        self.dra = np.abs(self.head['CDELT%d'%(ra_n)] * 3600) #arcesc
+        self.ddec = np.abs(self.head['CDELT%d'%(dec_n)] * 3600) #arcsec
+        #Load beam info
+        self.beam = {}
+        self.load_beam(fpath)
         if not mpath is None:
             self.mask = self.load_cube(mpath)
             if not np.all(self.mask.shape == self.img.shape):
@@ -184,10 +230,19 @@ class fitscube:
         if mpath is None:
             self.mask = np.ones_like(self.img)
 
+        self.saved_maps = {}
+
+
         self.set_axes(xi=xi,yi=yi,vi=vi) #Look in header for x,y,v axes indices.
         self.set_dvel(dvel=dvel) #Look in header to get dvel.
 
         self.init_wcs()
+    def load_beam(self,fpath):
+        f = fits.open(fpath)
+        self.beam['BMIN'] = np.mean(f[1].data['BMIN'])
+        self.beam['BMAJ'] = np.mean(f[1].data['BMAJ'])
+        self.beam['BPA']  = np.mean(f[1].data['BPA'])
+        f.close()
 
     def init_wcs(self):
         ra_n = self.header_get_CN(look_for='RA')
@@ -198,17 +253,26 @@ class fitscube:
         self.w.wcs.crval = [self.head['CRVAL%d'%(n)] for n in [ra_n,dec_n]]
         self.w.wcs.ctype = [self.head['CTYPE%d'%(n)] for n in [ra_n,dec_n]]
     def pix2world(self,x,y):
-        return self.w.wcs_pix2world(x,y,0)
+        return self.w.all_pix2world(x,y,1)
     def world2pix(self,ra,dec):
-        return self.w.wcs_world2pix(ra,dec,0)
+        return self.w.all_world2pix(ra,dec,1)
 
     def get_xy_arrs(self):
         x1d = np.arange(self.get_nx())
         y1d = np.arange(self.get_ny())
         return np.meshgrid(x1d,y1d)
-    def get_radec_arrs(self):
+    def get_radec_arrs(self,manual=True):
         x,y = self.get_xy_arrs()
-        return self.pix2world(x,y)
+        if manual:
+            crpix,cdelt,crval = self.w.wcs.crpix,self.w.wcs.cdelt,self.w.wcs.crval
+            ra = (x-crpix[0])*cdelt[0]+crval[0]
+            dec= (y-crpix[1])*cdelt[1]+crval[1]
+            return ra,dec
+        else:
+            return self.pix2world(x,y)
+
+    def get_beamcorr(self):
+        return (np.pi*self.beam['BMIN']*self.beam['BMAJ']/(4*np.log(2))) / (self.dra*self.ddec)
 
 
     def load_cube(self,path,header=False,trim=True,transpose=True):
@@ -250,7 +314,10 @@ class fitscube:
             return 1
         return self.img.shape[self.vi]
 
-    def get_mom0(self,use_mask=True,deproj=False):
+    def get_mom0(self,use_mask=True,clip=None):
+        if 'mom0' in self.saved_maps:
+            return self.saved_maps['mom0']
+
         if self.vi is None:
             return self.img
 
@@ -260,11 +327,27 @@ class fitscube:
             cube = self.img*self.mask
         else:
             cube = self.img
+        if not clip is None:
+            cube[cube<clip] = 0
         mom0 = np.trapz(np.moveaxis(cube,[self.xi,self.yi,self.vi],[0,1,2]),x=specarr,axis=2).T
-        if deproj:
-            pass
-        else:
-            return mom0
+        #Save and return
+        self.saved_maps['mom0'] = mom0
+        return mom0
+
+    def get_nchan_map(self):
+        if 'nchan' in self.saved_maps:
+            return self.saved_maps['nchan']
+        nchan = np.sum(self.mask,axis=self.vi)
+        #Save and return
+        self.saved_maps['nchan'] = nchan
+        return nchan
+    def get_channel_map(self,i):
+        k = 'channel%s'%(i)
+        if k in self.saved_maps:
+            return self.saved_maps[k]
+        chanmap = np.moveaxis(self.img,[self.xi,self.yi,self.vi],[0,1,2])[:,:,i].T
+        self.saved_maps[k] = chanmap
+        return chanmap
 
     def header_get_CN(self,look_for,get='first'):
         '''
@@ -359,12 +442,19 @@ class fitscube:
         N = self.header_get_CN(['FREQ','VEL'])
         return np.abs(self.head['CDELT%d'%(N)] / self.head['CRVAL%d'%(N)] * 3e5) # Velocity res in km/s
     
-    def display(self,img=None,method='contour',spat='radec',xarr=None,yarr=None,norm='linear',vmin=None,
-            vmax=None,levels=25,cmap='viridis',cbar=True,cbar_ax=None,ax=None,\
-            xlim=None,ylim=None,fill=True):
+    def display(self,channel='all',method='contour',spat='radec',xarr=None,yarr=None,norm='linear',vmin=None,
+            vmax=None,levels=25,nticks=10,cmap='viridis',colors=None,cbar=True,cbar_ax=None,cbar_orient='vertical',ax=None,\
+            xlim=None,ylim=None,fill=True,clip=None,mult=1.,**contour_kwargs):
         #Handle inputs!
-        if img is None:
-            img = self.get_mom0()
+        if channel == 'all':
+            img = self.get_mom0(clip=clip)
+        else:
+            try:
+                iter(channel)
+                img = channel
+            except TypeError:
+                img = self.get_channel_map(channel)
+        img = img.copy()*mult
         # make axes unless one is given.
         if ax is None:
             fig,ax = plt.subplots()
@@ -398,11 +488,13 @@ class fitscube:
                     levels = np.linspace(vmin,vmax,levels)
                 elif norm=='log':
                     levels = np.geomspace(vmin,vmax,levels)
+            img[img<vmin] = vmin
+            img[img>vmax] = vmax
             #Plot!
             if fill:
-                im = ax.contourf(xarr,yarr,img,levels=levels,cmap=cmap,extend='both',norm=cmnorm)
+                im = ax.contourf(xarr,yarr,img,levels=levels,cmap=cmap,extend='neither',norm=cmnorm,**contour_kwargs)
             else:
-                im = ax.contour(xarr,yarr,img,levels=levels,cmap=cmap,extend='both',norm=cmnorm)
+                im = ax.contour(xarr,yarr,img,levels=levels,cmap=cmap,colors=colors,extend='neither',norm=cmnorm,**contour_kwargs)
 
         if method == 'imshow':
             #Preparations:
@@ -436,16 +528,21 @@ class fitscube:
         except TypeError:
             pass
 
-        if cbar:
-            cax = self._make_cbar(ax,im,cbar_ax)
+        if cbar and fill:
+            try:
+                iter(nticks)
+                ticks = nticks
+            except TypeError:
+                ticks = np.linspace(vmin,vmax,nticks)
+            cax = self._make_cbar(ax,im,cbar_ax,ticks=ticks,cbar_orient=cbar_orient)
             return ax,cax
         return ax,None
 
-    def _make_cbar(self,ax, im, cbar_ax):
+    def _make_cbar(self,ax, im, cbar_ax,ticks=None,cbar_orient='vertical'):
         if cbar_ax is None:
-            cb=ax.get_figure().colorbar(im)
+            cb=ax.get_figure().colorbar(im,ax=ax,ticks=ticks,orientation=cbar_orient)
         else:
-            cb=ax.get_figure().colorbar(im, cax=cbar_ax)
+            cb=ax.get_figure().colorbar(im,ax=ax,cax=cbar_ax,ticks=ticks,orientation=cbar_orient)
         return cb.ax
 
 class diskgeom:
@@ -534,47 +631,14 @@ class diskgeom:
             phi = np.arctan2(y,x)
             d = (x**2+y**2)**0.5
         e = (1-np.cos(inc)**2)**0.5
-        b = d*(1-e*np.cos(phi-pa)**2)**0.5
+        b = d*(1-e*np.cos(phi+pa-np.pi/2)**2)**0.5
+        #b = d*(1-e*np.cos(phi-pa)**2)**0.5
         r = b/np.cos(inc)
-        az = (phi*180/np.pi+180-self.g['pa'])%360
+        az = (phi*180/np.pi+90+self.g['pa'])%360
+        #az = (phi*180/np.pi+180-self.g['pa'])%360
 
         #Return!
         return r,az
-
-    #def get_grid(self,inputs="rphi",target="mom0"):
-        #Get griddata points and values
-    #    return self.get_points(inputs), self.get_values(target)
-    #def get_points(self,k):
-    #    if k == 'raz':
-    #        if not k in self.points.keys():
-    #            r,az = self.get_raz_arrs()
-    #            self.points[k] = np.c_[r.flatten(),az.flatten()]
-    #        return self.points[k]
-    #    if k == 'xy':
-    #        if not k in self.points.keys():
-    #            x,y = self.get_xy_arrs()
-    #            self.points[k] = np.c_[x.flatten(),y.flatten()]
-    #        return self.points[k]
-    #    raise ValueError("Unknown griddata points key, %s"%(k))
-    #def get_values(self,k):
-    #    if k == 'mom0':
-    #        if not k in self.values.keys():
-    #            mom0 = self.cube.get_mom0()
-    #            self.values['mom0'] = mom0.flatten()
-    #        return self.values['mom0']
-    #    if k == 'r':
-    #        pts = self.get_points('raz')
-    #        return pts[:,0]
-    #    if k == 'az':
-    #        pts = self.get_points('raz')
-    #        return pts[:,1]
-    #    if k == 'x':
-    #        pts = self.get_points('xy')
-    #        return pts[:,0]
-    #    if k == 'y':
-    #        pts = self.get_points('xy')
-    #        return pts[:,1]
-    #    raise ValueError("Unknown griddata values key, %s"%(k))
 
     def get_raz_mask(self,rlo=0,rhi=None,azlo=0,azhi=360,use='radec',unit='arcsec'):
         r,az = self.get_raz_arrs(use=use,unit=unit)
@@ -680,14 +744,16 @@ class diskgeom:
             azims = (np.linspace(0,daz,Naz)+az_offset)%360
 
         
-        self.plot_ray(azims,rlo=rads[0],rhi=rads[-1],ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
-        self.plot_ellipse(rads,azlo=azims[0],azhi=azims[0]+daz,ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
+        if Nr > 0:
+            self.plot_ray(azims,rlo=rads[0],rhi=rads[-1],ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
+        if Naz > 0:
+            self.plot_ellipse(rads,azlo=azims[0],azhi=azims[0]+daz,ax=ax,use=use,center=center,unit=unit,**contour_kwargs)
 
         return ax
         
 
 
-def binary_chunkify(arr,bins,barr=None):
+def binary_chunkify(arr,bins,barr=None,final=True):
     if len(bins) == 1:
         split = barr<=bins[0]
         chunks = [arr[split],arr[~split]]
@@ -698,8 +764,10 @@ def binary_chunkify(arr,bins,barr=None):
         chunks = []
         i = int(len(bins)/2)
         split = barr<=bins[i]
-        left_chunks = binary_chunkify(arr[split],bins[:i],barr=barr[split])
-        right_chunks = binary_chunkify(arr[~split],bins[i+1:],barr=barr[~split])
+        left_chunks = binary_chunkify(arr[split],bins[:i],barr=barr[split],final=False)
+        right_chunks = binary_chunkify(arr[~split],bins[i+1:],barr=barr[~split],final=False)
         chunks.extend(left_chunks)
         chunks.extend(right_chunks)
-        return [chunk for chunk in chunks if len(chunk) > 0]
+        if final:
+            return chunks[1:-1]
+        return chunks 

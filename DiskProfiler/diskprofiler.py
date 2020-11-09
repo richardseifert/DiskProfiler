@@ -239,10 +239,21 @@ class fitscube:
         self.init_wcs()
     def load_beam(self,fpath):
         f = fits.open(fpath)
-        self.beam['BMIN'] = np.mean(f[1].data['BMIN'])
-        self.beam['BMAJ'] = np.mean(f[1].data['BMAJ'])
-        self.beam['BPA']  = np.mean(f[1].data['BPA'])
-        f.close()
+        try:
+            #First, check ordinary fits header.
+            self.beam['BMIN'] = f[0].header['BMIN']
+            self.beam['BMAJ'] = f[0].header['BMAJ']
+            self.beam['BPA']  = f[0].header['BPA']
+        except KeyError:
+            #If they aren't there, check for attached beam table.
+            if len(f) > 1:
+                self.beam['BMIN'] = np.mean(f[1].data['BMIN'])
+                self.beam['BMAJ'] = np.mean(f[1].data['BMAJ'])
+                self.beam['BPA']  = np.mean(f[1].data['BPA'])
+            else:
+                raise ValueError("Cannot locate beam information")
+        finally:
+            f.close()
 
     def init_wcs(self):
         ra_n = self.header_get_CN(look_for='RA')
